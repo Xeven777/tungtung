@@ -137,7 +137,9 @@ const BUNDLED_SYNTH_SOUNDS: &[&str] = &[
     "Soft", "Classic", "Bell", "Wood", "Digital", "Minimal",
 ];
 
-/// Meme / custom clips shipped in `public/sounds/` (stable URLs, no hashing).
+/// Meme clips shipped with the app. The frontend plays them via Vite-emitted
+/// asset URLs (`BUNDLED_CLIP_URLS` in `sounds.ts`); `file_path` is a fallback
+/// hint for older DB rows, not the load path.
 /// `bundled = 2` distinguishes file-backed defaults from synth defaults
 /// (`bundled = 1`) so `delete_sound` (which only allows `bundled = 0`) still
 /// protects both, and `clear_all_data` keeps both.
@@ -161,11 +163,13 @@ fn seed_bundled_sounds(conn: &Connection) -> AppResult<()> {
     }
     for (name, file) in BUNDLED_FILE_SOUNDS {
         let id = format!("bundled-{}", file.trim_end_matches(".opus"));
-        let path = format!("/sounds/{file}");
+        // `file_path` is NULL on purpose: bundled clips are served from the
+        // webview bundle via BUNDLED_CLIP_URLS, not from disk. Seeding a fake
+        // path here only creates a landmine if that map ever loses an entry.
         conn.execute(
             "INSERT OR IGNORE INTO sounds (id, name, file_path, bundled, enabled)
-             VALUES (?1, ?2, ?3, 2, 1)",
-            params![id, name, path],
+             VALUES (?1, ?2, NULL, 2, 1)",
+            params![id, name],
         )?;
     }
     Ok(())

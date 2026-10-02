@@ -4,7 +4,28 @@
  * played through an <audio> element, resolved via Tauri's asset protocol.
  */
 
+import animeAhhUrl from "@/assets/sounds/anime-ahh.opus";
+import catLaughUrl from "@/assets/sounds/cat-laugh.opus";
+import faaahUrl from "@/assets/sounds/faaah.opus";
+import screeamUrl from "@/assets/sounds/screeam.opus";
+import sirenUrl from "@/assets/sounds/siren.opus";
+import tungtungUrl from "@/assets/sounds/tungtung.opus";
 import { convertFileSrc } from "@tauri-apps/api/core";
+
+/**
+ * Clips shipped with the app. Vite emits them into `dist/assets/` with
+ * content hashes and gives us the final URLs here, so playback works in
+ * both `tauri dev` and bundled builds (no hardcoded `/sounds/...` paths
+ * that can 404 after a rebuild).
+ */
+export const BUNDLED_CLIP_URLS: Record<string, string> = {
+  "bundled-tungtung": tungtungUrl,
+  "bundled-siren": sirenUrl,
+  "bundled-screeam": screeamUrl,
+  "bundled-anime-ahh": animeAhhUrl,
+  "bundled-faaah": faaahUrl,
+  "bundled-cat-laugh": catLaughUrl,
+};
 
 export interface BuiltinSound {
   id: string;
@@ -98,15 +119,27 @@ export const BUILTIN_SOUNDS: BuiltinSound[] = [
   },
 ];
 
-let currentAudio: HTMLAudioElement | null = null;
+let currentSource: AudioBufferSourceNode | null = null;
+let playToken = 0;
 
 /** Play a bundled sound by id, or a custom file path when provided. */
 export function playSound(id: string | null | undefined, opts: { volume?: number; filePath?: string | null } = {}) {
   if (!id || id === "none") return;
   const volume = Math.min(1, Math.max(0, (opts.volume ?? 70) / 100));
 
+  // Shipped clips resolve through Vite's emitted asset URLs — already webview
+  // URLs, so they need no protocol conversion.
+  const bundledUrl = BUNDLED_CLIP_URLS[id];
+  if (bundledUrl) {
+    playFile(bundledUrl, volume);
+    return;
+  }
+
+  // Imported files live on disk and must go through the asset protocol. NOTE:
+  // absolute POSIX paths start with "/", so a root-relative check would swallow
+  // them and hand `new Audio()` a filesystem path it cannot fetch.
   if (opts.filePath) {
-    playFile(opts.filePath, volume);
+    playFile(toAssetUrl(opts.filePath), volume);
     return;
   }
 
@@ -117,29 +150,49 @@ export function playSound(id: string | null | undefined, opts: { volume?: number
   builtin.play(c, volume);
 }
 
-function resolveSource(path: string): string {
-  // Bundled/remote/blob sources are already playable URLs; imported files live
-  // on disk and must go through the asset protocol. App-bundled clips in
-  // `public/sounds/` are served relative to the webview root.
-  if (/^(https?:|blob:|data:|asset:)/.test(path) || path.startsWith("/")) return path;
+function toAssetUrl(filePath: string): string {
   try {
-    return convertFileSrc(path);
+    return convertFileSrc(filePath);
   } catch {
-    return path;
+    return filePath;
   }
 }
 
-function playFile(path: string, volume: number) {
-  try {
-    if (currentAudio) currentAudio.pause();
-    const audio = new Audio(resolveSource(path));
-    audio.volume = volume;
-    // Never let a missing/unsupported file crash the app.
-    audio.play().catch(() => undefined);
-    currentAudio = audio;
-  } catch {
-    // ignore
-  }
+/**
+ * Files are fetched and decoded rather than streamed into an <audio> element.
+ * Tauri's `tauri://localhost` protocol answers Range-less 200s, which WebKit's
+ * media stack refuses to play, and `get_asset` answers any unknown path with
+ * the app shell (`200 text/html`) instead of a 404 — so a bad URL failed
+ * silently. Decoding bytes we already hold sidesteps both.
+ */
+function playFile(url: string, volume: number) {
+  const c = audioContext();
+  if (!c) return;
+
+  const token = ++playToken;
+  if (currentSource) currentSource.stop();
+  currentSource = null;
+
+  void fetch(url)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      return res.arrayBuffer();
+    })
+    .then((bytes) => c.decodeAudioData(bytes))
+    .then((buffer) => {
+      // A newer sound started while this one was decoding.
+      if (token !== playToken) return;
+      const gain = c.createGain();
+      gain.gain.value = volume;
+      const source = c.createBufferSource();
+      source.buffer = buffer;
+      source.connect(gain).connect(c.destination);
+      source.start();
+      currentSource = source;
+    })
+    .catch((err) => {
+      console.warn(`[sounds] could not play ${url}`, err);
+    });
 }
 
 /** Short preview used in settings. */
