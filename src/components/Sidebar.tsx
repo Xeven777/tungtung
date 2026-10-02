@@ -61,13 +61,15 @@ export function Sidebar() {
     <aside className="flex h-full flex-col gap-3 border-r bg-sidebar px-5 py-6 max-[860px]:items-center max-[860px]:px-3">
       <div className="flex items-center gap-2 px-2.5 pb-5 max-[860px]:px-0">
         <img
-          src="../../src-tauri/icons/Square71x71Logo.png"
+          src="/icon.png"
           alt="TungTung"
           width={40}
           height={40}
           className="size-10 object-cover"
         />
-        <span className="max-[860px]:hidden text-xl font-bold cursor-pointer">TungTung</span>
+        <span className="max-[860px]:hidden text-xl font-bold cursor-pointer">
+          TungTung
+        </span>
       </div>
 
       <nav className="flex flex-col gap-0.5">

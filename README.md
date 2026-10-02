@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./public/icon.png" width="128" height="128" alt="TungTung logo" />
+  <img src="./src-tauri/icons/Square284x284Logo.png" width="128" height="128" alt="TungTung logo" />
 </p>
 
 <h1 align="center">TungTung 🍊⏰</h1>
