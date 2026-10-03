@@ -24,6 +24,15 @@ pub struct Prefs {
     pub micro_breaks_enabled: bool,
     pub micro_work_minutes: u32,
     pub micro_break_minutes: u32,
+    /// Global `soundEnabled`. Gates the app's own sound (not the OS notification).
+    pub sound_enabled: bool,
+    /// `volume` percentage (0-100).
+    pub volume: u8,
+    /// Chosen sound id per notification kind — used by the backend player when
+    /// no webview exists to play the sound itself.
+    pub reminder_sound: String,
+    pub habit_sound: String,
+    pub micro_break_sound: String,
 }
 
 impl Default for Prefs {
@@ -38,6 +47,11 @@ impl Default for Prefs {
             micro_breaks_enabled: true,
             micro_work_minutes: 50,
             micro_break_minutes: 5,
+            sound_enabled: true,
+            volume: 70,
+            reminder_sound: "builtin-soft".into(),
+            habit_sound: "none".into(),
+            micro_break_sound: "builtin-minimal".into(),
         }
     }
 }
@@ -127,6 +141,24 @@ impl RuntimePrefs {
                 minutes(&settings, "microWorkMinutes", prefs.micro_work_minutes);
             prefs.micro_break_minutes =
                 minutes(&settings, "microBreakMinutes", prefs.micro_break_minutes);
+            prefs.sound_enabled = settings
+                .get("soundEnabled")
+                .map(|v| truthy(v))
+                .unwrap_or(true);
+            if let Some(value) = settings.get("volume") {
+                if let Ok(parsed) = value.trim().parse::<u8>() {
+                    prefs.volume = parsed.min(100);
+                }
+            }
+            if let Some(value) = settings.get("reminderSound") {
+                prefs.reminder_sound = value.clone();
+            }
+            if let Some(value) = settings.get("habitSound") {
+                prefs.habit_sound = value.clone();
+            }
+            if let Some(value) = settings.get("microBreakSound") {
+                prefs.micro_break_sound = value.clone();
+            }
         }
         RuntimePrefs(Mutex::new(prefs))
     }
@@ -156,6 +188,15 @@ impl RuntimePrefs {
                     prefs.micro_break_minutes = m;
                 }
             }
+            "soundEnabled" => prefs.sound_enabled = truthy(value),
+            "volume" => {
+                if let Ok(parsed) = value.trim().parse::<u8>() {
+                    prefs.volume = parsed.min(100);
+                }
+            }
+            "reminderSound" => prefs.reminder_sound = value.to_string(),
+            "habitSound" => prefs.habit_sound = value.to_string(),
+            "microBreakSound" => prefs.micro_break_sound = value.to_string(),
             _ => {}
         }
     }

@@ -37,6 +37,7 @@ pub fn diagnostics(app_version: &str, db_path: &str) -> Diagnostics {
         notification_available: cfg!(target_os = "linux") || cfg!(target_os = "macos") || cfg!(target_os = "windows"),
         tray_available: true,
         audio_available: cfg!(target_os = "linux"),
+        audio_player: crate::sound::available_player().map(|name| name.to_string()),
         db_path: db_path.to_string(),
     }
 }

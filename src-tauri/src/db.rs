@@ -582,6 +582,20 @@ pub fn list_sounds(conn: &Connection) -> AppResult<Vec<Sound>> {
     Ok(out)
 }
 
+/// File path for a single sound id, used by the backend player when the UI is
+/// not around to play the sound itself. `None` means the id is unknown or has
+/// no file (e.g. bundled clips and built-in tones resolve elsewhere).
+pub fn sound_file_path(conn: &Connection, id: &str) -> AppResult<Option<String>> {
+    let path = conn
+        .query_row(
+            "SELECT file_path FROM sounds WHERE id=?1",
+            params![id],
+            |row| row.get::<_, Option<String>>("file_path"),
+        )
+        .optional()?;
+    Ok(path.flatten())
+}
+
 pub fn insert_sound(conn: &Connection, name: &str, file_path: &str) -> AppResult<Sound> {
     let sound = Sound {
         id: uuid::Uuid::new_v4().to_string(),

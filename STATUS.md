@@ -242,3 +242,71 @@ If XFCE is home base: keep `notify-rust` native (what we have) and
 optionally polish the **in-app Sonner toast** to carry the branding — best
 effort-to-reward. Go custom overlay only if clickable Done/Snooze
 *outside the app window* is worth the Wayland caveats.
+
+---
+
+## Memory footprint (implemented)
+
+Measured baseline on a Linux/WebKitGTK 2.54 machine while hidden to the tray:
+
+| Process | RSS | PSS | Pss_Anon |
+|---|---|---|---|
+| `tungtung` (Rust + GTK) | 134 MB | 39.5 MB | 7 MB |
+| `WebKitWebProcess` | 228 MB | 147 MB | 79 MB |
+| `WebKitNetworkProcess` | 41 MB | 8.3 MB | 1 MB |
+
+Group RSS (~400 MB) double-counts shared libraries; PSS (~195 MB) is the real
+figure, and the WebKit renderer is ~75% of it. Reductions applied:
+
+1. **Lazy window lifecycle** (`lib.rs`): the main webview is no longer created
+   at startup from `tauri.conf.json` (`windows: []`). It is built on first open
+   via `create_main_window` / `show_main_window`, and **destroyed** (not merely
+   hidden) on close-to-tray, which tears down the WebKit renderer while the
+   tray + scheduler keep the process alive. `RunEvent::ExitRequested` is
+   prevented only when the last window closes *and* `closeToTray` is on, so the
+   tray "Quit" (`app.exit(0)`) still exits.
+2. **Deferred actions** (`pending.rs`, `commands.rs::ui_ready`, `App.tsx`):
+   tray clicks / the global shortcut can now arrive while no webview exists, so
+   intents (`QuickAdd`, `Navigate`, `FocusToggle`) are buffered and drained once
+   the frontend has registered its listeners and calls `ui_ready`.
+3. **WebKitGTK / allocator env** (`main.rs`, set before init, user-overridable):
+   `MALLOC_ARENA_MAX=2` only. The compositing/dmabuf disables were removed —
+   the window is transparent with rounded corners, which requires the
+   accelerated compositing path, so disabling it made the window render garbled
+   and unclickable. They can still be tested per-run by exporting them before
+   launch (we only set defaults, so an explicit value wins).
+
+Expected: background (hidden) drops to roughly the main-process footprint
+(~40 MB PSS); open window ~140–160 MB PSS (WebKitGTK's floor for a React app).
+If the window ever renders garbled/unclickable, `WEBKIT_DISABLE_COMPOSITING_MODE`
+and `WEBKIT_DISABLE_DMABUF_RENDERER` are the culprits — the transparent rounded
+window needs the compositing path, so they are NOT set.
+
+To measure: `for p in $(pgrep -f 'tungtung|WebKitWebProcess'); do awk '/^Pss:/{s+=$2} END{printf "pid %s %d kB\n","'$p'",s}' /proc/$p/smaps_rollup; done`
+
+---
+
+## Backend sound playback (implemented)
+
+Problem: close-to-tray destroys the webview, so the frontend — which owns all
+sound playback — could not play reminder/habit/micro-break sounds while the app
+was closed; only the OS notification's generic system sound fired.
+
+Fix: the scheduler now also plays sound from Rust whenever no webview exists
+(`sound::play_if_hidden`), mirroring the frontend's gating (`soundEnabled`,
+quiet hours) and the per-event settings (`reminderSound`, `habitSound`,
+`microBreakSound`), which were added to `RuntimePrefs`.
+
+- Resolution: `builtin-*` -> synthesized in-process to a cached WAV (mirrors
+  `sounds.ts` tones); `bundled-*` -> app resource files
+  (`bundle.resources: resources/sounds/*.opus`, which are copies of
+  `src/assets/sounds/`); anything else -> `file_path` from the `sounds` table
+  (user imports) via `db::sound_file_path`.
+- Playback: spawns the first available system player (`pw-play`, `paplay`,
+  `ffplay`, `play`, `cvlc`, `aplay`), detached with a reaper thread so no
+  zombies. Volume follows the app's `volume` setting.
+- When a webview exists the backend skips playback so the sound never doubles.
+- The OS notification (`notify::send` + `theme_sound` mapping) is unchanged and
+  still fires alongside.
+
+

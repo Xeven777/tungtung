@@ -225,8 +225,17 @@ pub fn set_setting(state: State<'_, AppState>, key: String, value: String) -> Ap
     db::put_setting(&state.conn(), &key, &value)?;
     // Keep the scheduler's copy in sync so gating changes take effect at once.
     state.prefs.apply(&key, &value);
-    // Only a change to the break schedule itself should restart the interval.
-    if key.starts_with("microBreak") || key == "quietHoursEnabled" {
+    // Re-anchor the in-memory countdown only when the *firing schedule* itself
+    // changed. Notably `microWorkMinutes` must be covered: the interval is
+    // anchored to the previous value until the timer is restarted, which is
+    // why a new work interval previously needed a full app restart to apply.
+    let schedule_keys = [
+        "microBreaksEnabled",
+        "microWorkMinutes",
+        "microBreakMinutes",
+        "quietHoursEnabled",
+    ];
+    if schedule_keys.contains(&key.as_str()) {
         reset_micro_break(&state);
     }
     state.scheduler.wake();
@@ -493,4 +502,17 @@ fn all_completions(conn: &Connection) -> AppResult<Vec<HabitCompletion>> {
         out.push(r?);
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Window lifecycle
+// ---------------------------------------------------------------------------
+
+/// Called once by the frontend after its event listeners are registered. Marks
+/// the UI ready and returns any action that was requested while the webview did
+/// not exist (tray click / global shortcut on a destroyed window).
+#[tauri::command]
+pub fn ui_ready() -> Option<crate::pending::PendingAction> {
+    crate::pending::set_ready(true);
+    crate::pending::take()
 }

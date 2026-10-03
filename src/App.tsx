@@ -10,7 +10,7 @@ import { TitleBar } from "@/components/TitleBar";
 import { Toaster } from "@/components/ui/sonner";
 import { api } from "@/lib/api";
 import { playSound } from "@/lib/sounds";
-import type { Reminder } from "@/lib/types";
+import type { PendingAction, Reminder } from "@/lib/types";
 import { inQuietHours, useStore, watchSystemTheme, type Route } from "@/store";
 import { Today } from "@/views/Today";
 
@@ -45,6 +45,77 @@ const ROUTE_KEYS: Record<string, Route> = {
 // StrictMode mounts effects twice in development, so guard against double init.
 let bootstrapped = false;
 
+/**
+ * Handle a due micro break the same way whether it arrives as a live event or
+ * as a buffered action after the window was recreated.
+ */
+function applyMicroBreakDue(breakSeconds?: number) {
+  const state = useStore.getState();
+  const seconds =
+    breakSeconds ?? (Number(state.settings.microBreakMinutes) || 5) * 60;
+  const sound = state.sounds.find(
+    (item) => item.id === state.settings.microBreakSound,
+  );
+
+  if (
+    state.settings.soundEnabled === "true" &&
+    state.settings.microBreakSound !== "none" &&
+    !inQuietHours(state.settings)
+  ) {
+    playSound(state.settings.microBreakSound, {
+      volume: Number(state.settings.volume),
+      filePath: sound?.filePath,
+    });
+  }
+
+  if (state.settings.microBreakOverlay === "true") {
+    state.startMicroBreak(seconds);
+    return;
+  }
+
+  // Without the overlay the nudge has to offer the break instead.
+  state.pushToast({
+    title: "Time for a break",
+    body: "Look away from the screen for a few minutes.",
+    actions: [
+      {
+        label: "Start break",
+        run: () => useStore.getState().startMicroBreak(seconds),
+      },
+      {
+        label: "Snooze",
+        run: () =>
+          useStore
+            .getState()
+            .snoozeMicroBreak(Number(state.settings.snoozeMinutes) || 10),
+      },
+    ],
+  });
+}
+
+/**
+ * Apply an action the backend buffered while the webview did not exist (the
+ * window is created lazily and destroyed when hidden to the tray). See
+ * `src-tauri/src/pending.rs`.
+ */
+function applyPendingAction(action: PendingAction) {
+  const state = useStore.getState();
+  switch (action.kind) {
+    case "quickAdd":
+      state.openQuickAdd();
+      break;
+    case "navigate":
+      state.setRoute(action.route as Route);
+      break;
+    case "focusToggle":
+      state.focusToggle(action.running);
+      break;
+    case "microBreakDue":
+      applyMicroBreakDue(action.breakSeconds);
+      break;
+  }
+}
+
 export default function App() {
   const route = useStore((s) => s.route);
 
@@ -72,11 +143,14 @@ export default function App() {
     // otherwise never be removed — and every event would fire twice.
     let disposed = false;
     const unlisteners: (() => void)[] = [];
+    const registered: Promise<void>[] = [];
     const track = (pending: Promise<() => void>) => {
-      void pending.then((unlisten) => {
-        if (disposed) unlisten();
-        else unlisteners.push(unlisten);
-      });
+      registered.push(
+        pending.then((unlisten) => {
+          if (disposed) unlisten();
+          else unlisteners.push(unlisten);
+        }),
+      );
     };
 
     track(
@@ -168,48 +242,7 @@ export default function App() {
 
     track(
       listen<{ breakSeconds?: number }>("micro-break-due", (event) => {
-        const state = useStore.getState();
-        const breakSeconds =
-          event.payload?.breakSeconds ??
-          (Number(state.settings.microBreakMinutes) || 5) * 60;
-        const sound = state.sounds.find(
-          (item) => item.id === state.settings.microBreakSound,
-        );
-
-        if (
-          state.settings.soundEnabled === "true" &&
-          state.settings.microBreakSound !== "none" &&
-          !inQuietHours(state.settings)
-        ) {
-          playSound(state.settings.microBreakSound, {
-            volume: Number(state.settings.volume),
-            filePath: sound?.filePath,
-          });
-        }
-
-        if (state.settings.microBreakOverlay === "true") {
-          state.startMicroBreak(breakSeconds);
-          return;
-        }
-
-        // Without the overlay the nudge has to offer the break instead.
-        state.pushToast({
-          title: "Time for a break",
-          body: "Look away from the screen for a few minutes.",
-          actions: [
-            {
-              label: "Start break",
-              run: () => useStore.getState().startMicroBreak(breakSeconds),
-            },
-            {
-              label: "Snooze",
-              run: () =>
-                useStore
-                  .getState()
-                  .snoozeMicroBreak(Number(state.settings.snoozeMinutes) || 10),
-            },
-          ],
-        });
+        applyMicroBreakDue(event.payload?.breakSeconds);
       }),
     );
 
@@ -236,6 +269,16 @@ export default function App() {
         useStore.getState().setRoute(event.payload as Route);
       }),
     );
+
+    // Once every listener is registered the backend can safely deliver events
+    // to us, so claim readiness and drain any action requested while the
+    // webview did not exist (tray click on a destroyed window, global shortcut).
+    void Promise.all(registered).then(() => {
+      if (disposed) return;
+      void api.uiReady().then((action) => {
+        if (!disposed && action) applyPendingAction(action);
+      });
+    });
 
     return () => {
       disposed = true;

@@ -4,33 +4,88 @@ mod error;
 mod microbreak;
 mod models;
 mod notify;
+mod pending;
 mod platform;
 mod prefs;
 mod recurrence;
 mod scheduler;
+mod sound;
 
 use std::sync::{Arc, Mutex};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 use commands::AppState;
 use microbreak::MicroBreak;
+use pending::PendingAction;
 use prefs::RuntimePrefs;
 
 fn quick_add_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space)
 }
 
+/// Build the single main webview window with the app's custom chrome.
+///
+/// The window is created lazily — on first open, and again after it has been
+/// destroyed when the app was hidden to the tray — rather than at startup. The
+/// WebKit renderer is the bulk of the app's memory footprint, so not creating
+/// it while the app lives in the tray keeps the background cost tiny.
+fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
+    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("TungTung")
+        .inner_size(900.0, 680.0)
+        .min_inner_size(720.0, 520.0)
+        .resizable(true)
+        .center()
+        .decorations(false)
+        .transparent(true)
+        .visible(false)
+        .build()
+}
+
+/// Show (creating if necessary) the main window and focus it.
 fn show_main_window(app: &tauri::AppHandle) {
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => match create_main_window(app) {
+            Ok(window) => window,
+            Err(err) => {
+                eprintln!("failed to create main window: {err}");
+                return;
+            }
+        },
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+/// Show the window and deliver a user action to it. If the webview was just
+/// (re)created, `dispatch` buffers the action until the UI calls `ui_ready`.
+fn open_action(app: &tauri::AppHandle, action: PendingAction) {
+    show_main_window(app);
+    pending::dispatch(app, action);
+}
+
+/// Best-effort recreation of the main window for an event that must surface.
+pub(crate) fn pending_window(app: &tauri::AppHandle, action: PendingAction) -> bool {
+    if app.get_webview_window("main").is_some() {
+        return false;
+    }
+    if create_main_window(app).is_err() {
+        return false;
+    }
+    pending::dispatch(app, action);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+    true
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,8 +106,7 @@ pub fn run() {
                         return;
                     }
                     if shortcut == &quick_add_shortcut() {
-                        show_main_window(app);
-                        let _ = tauri::Emitter::emit(app, "quick-add", ());
+                        open_action(app, PendingAction::QuickAdd);
                     }
                 })
                 .build(),
@@ -96,23 +150,32 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() != "main" {
-                    return;
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    // Close to tray: keep the app (and scheduler) alive so
+                    // background reminders keep firing. When the user turns this
+                    // off, closing the window quits the app.
+                    let close_to_tray = window
+                        .app_handle()
+                        .state::<AppState>()
+                        .prefs
+                        .snapshot()
+                        .close_to_tray;
+                    if close_to_tray {
+                        api.prevent_close();
+                        // Destroy rather than hide: this tears down the WebKit
+                        // renderer (the bulk of the app's memory) while the tray
+                        // icon and scheduler keep the process alive. The window
+                        // is rebuilt on demand by `show_main_window`.
+                        pending::set_ready(false);
+                        let _ = window.destroy();
+                    }
                 }
-                // Close to tray: keep the app (and scheduler) alive so
-                // background reminders keep firing. When the user turns this
-                // off, closing the window quits the app.
-                let close_to_tray = window
-                    .app_handle()
-                    .state::<AppState>()
-                    .prefs
-                    .snapshot()
-                    .close_to_tray;
-                if close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
+                WindowEvent::Destroyed => pending::set_ready(false),
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -150,9 +213,28 @@ pub fn run() {
             commands::import_data,
             commands::parse_export,
             commands::clear_all_data,
+            commands::ui_ready,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // With close-to-tray the main window is *destroyed* (not hidden) so
+            // the WebKit renderer is freed, which means destroying it trips the
+            // framework's last-window shutdown. Keep the tray + scheduler alive
+            // unless an explicit exit was requested (tray "Quit" calls
+            // `app.exit(0)`, which arrives here with `code = Some(..)`).
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    let close_to_tray = app
+                        .try_state::<AppState>()
+                        .map(|state| state.prefs.snapshot().close_to_tray)
+                        .unwrap_or(false);
+                    if close_to_tray {
+                        api.prevent_exit();
+                    }
+                }
+            }
+        });
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -175,21 +257,19 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip("TungTung")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
-            "new-reminder" => {
-                show_main_window(app);
-                let _ = tauri::Emitter::emit(app, "quick-add", ());
-            }
-            "start-focus" => {
-                show_main_window(app);
-                let _ = tauri::Emitter::emit(app, "focus-toggle", true);
-            }
+            "new-reminder" => open_action(app, PendingAction::QuickAdd),
+            "start-focus" => open_action(app, PendingAction::FocusToggle { running: true }),
             "pause-focus" => {
+                // Pausing only makes sense while the UI is open; if it is not,
+                // there is no running session to pause.
                 let _ = tauri::Emitter::emit(app, "focus-toggle", false);
             }
-            "settings" => {
-                show_main_window(app);
-                let _ = tauri::Emitter::emit(app, "navigate", "settings");
-            }
+            "settings" => open_action(
+                app,
+                PendingAction::Navigate {
+                    route: "settings".into(),
+                },
+            ),
             "quit" => app.exit(0),
             _ => {}
         })

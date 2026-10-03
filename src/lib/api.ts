@@ -9,6 +9,7 @@ import type {
   HabitWithStats,
   HistoryEntry,
   MicroBreakStatus,
+  PendingAction,
   Reminder,
   ReminderInput,
   Sound,
@@ -99,4 +100,11 @@ export const api = {
   parseExport: (raw: string) => invoke<ExportBundle>("parse_export", { raw }),
 
   clearAllData: () => invoke<void>("clear_all_data"),
+
+  /**
+   * Tell the backend the UI is mounted with its listeners registered. Returns
+   * an action requested while the window did not exist (e.g. a tray click that
+   * recreated the window), so the caller can apply it.
+   */
+  uiReady: () => invoke<PendingAction | null>("ui_ready"),
 };

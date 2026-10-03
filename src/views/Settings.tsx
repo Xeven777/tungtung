@@ -333,7 +333,11 @@ export function Settings() {
           <CardContent className="divide-y">
             <Row
               label="Import sound"
-              hint="WAV, OGG or MP3 · short clips work best"
+              hint={
+                diagnostics?.audioPlayer
+                  ? `WAV, OGG or MP3 · short clips work best · closed-app playback uses ${diagnostics.audioPlayer}`
+                  : "WAV, OGG or MP3 · short clips work best · sounds only play while the app is open unless you install one of pw-play, paplay, ffplay, sox, vlc or alsa-utils"
+              }
               control={
                 <Button variant="outline" onClick={importSoundFile}>
                   <UploadSimple size={14} data-icon="inline-start" /> Import
@@ -530,6 +534,23 @@ export function Settings() {
                 <span className="break-all">{diagnostics?.dbPath ?? "—"}</span>
               }
               control={null}
+            />
+            <Row
+              label={
+                <span className="flex items-center gap-1.5">
+                  <Info size={12} /> Background audio
+                </span>
+              }
+              hint={
+                diagnostics?.audioPlayer
+                  ? `Sounds play even while closed, using ${diagnostics.audioPlayer}`
+                  : "Not available — install one of pw-play, paplay, ffplay, sox, vlc or alsa-utils for sounds while closed"
+              }
+              control={
+                <Badge variant={diagnostics?.audioPlayer ? "secondary" : "destructive"}>
+                  {diagnostics?.audioPlayer ? "Yes" : "No"}
+                </Badge>
+              }
             />
           </CardContent>
         </Card>

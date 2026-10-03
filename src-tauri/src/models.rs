@@ -138,6 +138,10 @@ pub struct Diagnostics {
     pub notification_available: bool,
     pub tray_available: bool,
     pub audio_available: bool,
+    /// First installed backend sound player (`pw-play`, `paplay`, `ffplay`,
+    /// ...), if any. When `None`, sounds can only play while the app window is
+    /// open, and the UI should say what to install.
+    pub audio_player: Option<String>,
     pub db_path: String,
 }
 

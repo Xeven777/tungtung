@@ -5,15 +5,17 @@ use std::time::Duration;
 
 use chrono::{DateTime, Datelike, Local, NaiveTime, Timelike, Utc};
 use rusqlite::Connection;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
 use crate::error::AppResult;
 use crate::microbreak::MicroBreak;
 use crate::models::Reminder;
 use crate::notify::{self, Kind};
+use crate::pending::{self, PendingAction};
 use crate::prefs::RuntimePrefs;
 use crate::recurrence::next_due;
+use crate::sound::{self, SoundSlot};
 
 /// Upper bound on how long the scheduler sleeps before re-checking the wall
 /// clock. This is a low-frequency safety net for suspend/resume and clock
@@ -93,7 +95,7 @@ fn run_loop(
         if let Err(err) = process_habit_reminders(app, conn, prefs, local_now) {
             eprintln!("scheduler: processing habits failed: {err}");
         }
-        process_micro_break(app, micro, prefs, local_now);
+        process_micro_break(app, conn, micro, prefs, local_now);
 
         let wait = next_wait(conn, now, micro.next_at());
         let guard = handle.inner.lock.lock().unwrap();
@@ -118,7 +120,7 @@ fn process_due(
     }
 
     for reminder in due {
-        fire_reminder(app, prefs, &reminder);
+        fire_reminder(app, conn, prefs, &reminder);
 
         let anchor = DateTime::parse_from_rfc3339(&reminder.due_at)
             .map(|d| d.with_timezone(&Utc))
@@ -147,9 +149,13 @@ fn process_due(
     Ok(())
 }
 
-fn fire_reminder(app: &AppHandle, prefs: &Arc<RuntimePrefs>, reminder: &Reminder) {
+fn fire_reminder(app: &AppHandle, conn: &Connection, prefs: &Arc<RuntimePrefs>, reminder: &Reminder) {
     // The in-app toast always fires; only the OS notification is gated.
     let _ = app.emit("reminder-fired", reminder.clone());
+
+    // When the window is closed the webview is gone, so the frontend cannot
+    // play the sound — do it from here instead.
+    sound::play_if_hidden(app, conn, prefs, SoundSlot::Reminder, Local::now());
 
     if !reminder.notification_enabled {
         return;
@@ -223,6 +229,8 @@ fn process_habit_reminders(
             }),
         );
 
+        sound::play_if_hidden(app, conn, prefs, SoundSlot::Habit, now);
+
         if prefs.snapshot().notifications_suppressed() {
             continue;
         }
@@ -267,33 +275,58 @@ fn is_scheduled_today(habit: &crate::models::Habit, weekday: &str) -> bool {
 /// machine. The overlay and its countdown live in the UI.
 fn process_micro_break(
     app: &AppHandle,
+    conn: &Connection,
     micro: &Arc<MicroBreak>,
     prefs: &Arc<RuntimePrefs>,
     now: DateTime<Local>,
 ) {
-    let prefs = prefs.snapshot();
-    if !prefs.micro_breaks_enabled {
+    let snap = prefs.snapshot();
+    if !snap.micro_breaks_enabled {
         micro.clear();
         return;
     }
 
-    let work = chrono::Duration::minutes(i64::from(prefs.micro_work_minutes));
+    let work = chrono::Duration::minutes(i64::from(snap.micro_work_minutes));
     if !micro.take_due(work, now) {
         return;
     }
 
     // Quiet hours silence the nudge entirely — a break prompt at 2am is noise.
-    if prefs.in_quiet_hours(now) {
+    if snap.in_quiet_hours(now) {
         return;
     }
 
-    let break_seconds = i64::from(prefs.micro_break_minutes) * 60;
-    let _ = app.emit(
-        "micro-break-due",
-        serde_json::json!({ "breakSeconds": break_seconds }),
-    );
+    let break_seconds = i64::from(snap.micro_break_minutes) * 60;
 
-    if !prefs.notifications_enabled {
+    // A due break should surface: if a window can show the overlay, hand it
+    // over immediately; otherwise rebuild the window around the overlay (the
+    // webview was destroyed when the app went to the tray). Purely minimized
+    // windows are restored, not hidden ones — there is nothing to cover there.
+    match app.get_webview_window("main") {
+        Some(window) => {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+            pending::set_ready(true);
+            let _ = app.emit(
+                "micro-break-due",
+                serde_json::json!({ "breakSeconds": break_seconds }),
+            );
+        }
+        None => {
+            if !crate::pending_window(app, PendingAction::MicroBreakDue { break_seconds }) {
+                let _ = app.emit(
+                    "micro-break-due",
+                    serde_json::json!({ "breakSeconds": break_seconds }),
+                );
+            }
+        }
+    }
+
+    // Only reached outside quiet hours (checked above), so this is safe.
+    sound::play_if_hidden(app, conn, prefs, SoundSlot::MicroBreak, now);
+
+    if !snap.notifications_enabled {
         return;
     }
 

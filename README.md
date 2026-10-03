@@ -47,6 +47,10 @@
 - [Bun](https://bun.sh/) 🍞
 - [Rust](https://rustup.rs/) 🦀
 - Tauri Linux deps ([guide](https://v2.tauri.app/start/prerequisites/)) 🐧
+- One CLI audio player for reminder sounds while the app is closed to the
+  tray (detected automatically — Settings → About shows which one is used):
+  PipeWire's `pw-play`, PulseAudio's `paplay`, `ffmpeg` (ships `ffplay`),
+  `sox` (`play`), `vlc` (`cvlc`), or `alsa-utils` (`aplay`) 🔊
 
 ```bash
 # 1️⃣ Clone it

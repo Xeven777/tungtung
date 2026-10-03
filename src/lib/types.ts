@@ -90,6 +90,8 @@ export interface Diagnostics {
   notificationAvailable: boolean;
   trayAvailable: boolean;
   audioAvailable: boolean;
+  /** First installed backend sound player (`pw-play`, `paplay`, …) or null. */
+  audioPlayer: string | null;
   dbPath: string;
 }
 
@@ -133,3 +135,14 @@ export type AppSettings = Record<string, string>;
 export interface SettingsDefaults {
   [key: string]: string;
 }
+
+/**
+ * A user intent requested from the tray or global shortcut while the main
+ * window may not exist yet. Delivered by the backend `ui_ready` command.
+ * Mirrors `PendingAction` in `src-tauri/src/pending.rs`.
+ */
+export type PendingAction =
+  | { kind: "quickAdd" }
+  | { kind: "navigate"; route: string }
+  | { kind: "focusToggle"; running: boolean }
+  | { kind: "microBreakDue"; breakSeconds: number };

@@ -29,16 +29,35 @@ export function MicroBreakOverlay() {
     if (!micro.open) return;
 
     const win = getCurrentWindow();
-    const previous = { wasFullscreen: false };
-    const ready = (async () => {
-      const visible = await win.isVisible().catch(() => true);
-      if (!visible) return;
-      previous.wasFullscreen = await win.isFullscreen().catch(() => false);
-      await win.setFullscreen(true).catch(() => undefined);
-    })();
+    const previous = { wasFullscreen: false, finished: false };
+
+    const attemptFullscreen = () =>
+      win
+        .isVisible()
+        .then((visible) => {
+          if (!visible || previous.finished) return;
+          return win.isFullscreen().then((wasFullscreen) => {
+            if (previous.finished) return undefined;
+            previous.wasFullscreen = wasFullscreen;
+            return win.setFullscreen(true);
+          });
+        })
+        .catch(() => undefined);
+
+    // The first attempt happens when the overlay mounts, but a minimized window
+    // cannot go fullscreen — retry when the window is actually restored and
+    // focused so the overlay covers the whole screen instead of just the box.
+    const ready = attemptFullscreen();
+    const unlisten = win
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused) void attemptFullscreen();
+      })
+      .catch(() => () => undefined);
 
     return () => {
+      previous.finished = true;
       void ready.then(() => {
+        unlisten.then((stop: () => void) => stop());
         if (!previous.wasFullscreen) void win.setFullscreen(false).catch(() => undefined);
       });
     };
