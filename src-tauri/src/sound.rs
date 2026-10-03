@@ -1,9 +1,10 @@
-//! Backend audio playback for notifications that fire while the main window
-//! does not exist.
+//! Backend audio playback for notifications that fire while the UI is not ready.
 //!
-//! The webview is destroyed when the app is hidden to the tray (to free the
-//! WebKit renderer), so the frontend — which normally owns sound playback — is
-//! gone. This module lets the scheduler play the user's chosen sound itself.
+//! The main webview is created lazily and only hidden to the tray, so it may
+//! not exist yet when a notification fires (or its listeners may not be
+//! registered). The frontend normally owns sound playback, but until it
+//! signals readiness via `ui_ready` this module lets the scheduler play the
+//! user's chosen sound itself.
 //!
 //! A sound id resolves to one of three sources:
 //! * `builtin-*`  — synthesized here as a small WAV (mirrors `src/lib/sounds.ts`).
@@ -30,13 +31,14 @@ pub enum SoundSlot {
     Reminder,
     Habit,
     MicroBreak,
+    /// Chime for a naturally completed focus phase.
+    Pomodoro,
 }
 
-/// Play the configured sound for `slot`, but only when the UI cannot: if a
-/// webview exists the frontend plays it (with its own volume + preview state),
-/// so playing here too would double up. The guarded unit itself answers this
-/// readiness question (see the `pending` module): `false` means no webview is
-/// mounted yet, `true` means the frontend owns playback.
+/// Play the configured sound for `slot`, but only until the UI is ready: once
+/// the frontend has registered its listeners (see `pending::is_ready`) it
+/// plays sounds itself (with its own volume + preview state), so playing here
+/// too would double up.
 pub fn play_if_hidden(
     app: &AppHandle,
     conn: &Connection,
@@ -60,6 +62,7 @@ pub fn play_if_hidden(
         SoundSlot::Reminder => prefs.reminder_sound.as_str(),
         SoundSlot::Habit => prefs.habit_sound.as_str(),
         SoundSlot::MicroBreak => prefs.micro_break_sound.as_str(),
+        SoundSlot::Pomodoro => prefs.pomodoro_sound.as_str(),
     };
     if id.is_empty() || id == "none" {
         return;

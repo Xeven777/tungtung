@@ -9,6 +9,7 @@ use tauri::State;
 
 use crate::db::{self, now_iso, today_local};
 use crate::error::{AppError, AppResult};
+use crate::focus::{Focus, FocusStatus};
 use crate::microbreak::MicroBreak;
 use crate::models::*;
 use crate::platform;
@@ -24,10 +25,11 @@ pub struct AppState {
     pub scheduler: SchedulerHandle,
     pub prefs: Arc<RuntimePrefs>,
     pub micro_break: Arc<MicroBreak>,
+    pub focus: Arc<Focus>,
 }
 
 impl AppState {
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -134,22 +136,58 @@ pub fn toggle_habit(state: State<'_, AppState>, habit_id: String, date: Option<S
 }
 
 // ---------------------------------------------------------------------------
-// Focus sessions
+// Focus sessions (timer owned by Rust — see `focus.rs`)
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn start_focus_session(state: State<'_, AppState>, input: FocusSessionInput) -> AppResult<FocusSession> {
-    db::start_focus_session(&state.conn(), &input)
+pub fn focus_status(state: State<'_, AppState>) -> AppResult<FocusStatus> {
+    Ok(state.focus.status())
 }
 
 #[tauri::command]
-pub fn end_focus_session(
+pub fn focus_start(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<FocusStatus> {
+    let status = crate::focus::start(&app, &state.conn(), &state.prefs, &state.focus);
+    state.scheduler.wake();
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn focus_pause(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<FocusStatus> {
+    let status = crate::focus::pause(&app, &state.focus);
+    state.scheduler.wake();
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn focus_resume(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<FocusStatus> {
+    let status = crate::focus::resume(&app, &state.conn(), &state.prefs, &state.focus);
+    state.scheduler.wake();
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn focus_toggle(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
-    id: String,
-    actual_seconds: i64,
-    completed: bool,
-) -> AppResult<Option<FocusSession>> {
-    db::end_focus_session(&state.conn(), &id, actual_seconds, completed)
+    running: Option<bool>,
+) -> AppResult<FocusStatus> {
+    let status = crate::focus::toggle(&app, &state.conn(), &state.prefs, &state.focus, running);
+    state.scheduler.wake();
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn focus_skip(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<FocusStatus> {
+    let status = crate::focus::skip(&app, &state.conn(), &state.prefs, &state.focus);
+    state.scheduler.wake();
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn focus_reset(app: tauri::AppHandle, state: State<'_, AppState>) -> AppResult<FocusStatus> {
+    let status = crate::focus::reset(&app, &state.conn(), &state.focus);
+    state.scheduler.wake();
+    Ok(status)
 }
 
 #[tauri::command]
@@ -509,8 +547,8 @@ fn all_completions(conn: &Connection) -> AppResult<Vec<HabitCompletion>> {
 // ---------------------------------------------------------------------------
 
 /// Called once by the frontend after its event listeners are registered. Marks
-/// the UI ready and returns any action that was requested while the webview did
-/// not exist (tray click / global shortcut on a destroyed window).
+/// the UI ready and returns any action that was requested while no webview
+/// existed yet (lazy start / tray click / global shortcut before mount).
 #[tauri::command]
 pub fn ui_ready() -> Option<crate::pending::PendingAction> {
     crate::pending::set_ready(true);

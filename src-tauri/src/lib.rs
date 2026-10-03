@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod error;
+mod focus;
 mod microbreak;
 mod models;
 mod notify;
@@ -30,10 +31,12 @@ fn quick_add_shortcut() -> Shortcut {
 
 /// Build the single main webview window with the app's custom chrome.
 ///
-/// The window is created lazily — on first open, and again after it has been
-/// destroyed when the app was hidden to the tray — rather than at startup. The
-/// WebKit renderer is the bulk of the app's memory footprint, so not creating
-/// it while the app lives in the tray keeps the background cost tiny.
+/// The window is created lazily — on first open rather than at startup — so a
+/// start-minimized/autostart launch never pays for the WebKit renderer until
+/// the user actually opens the app. After that the window is hidden (never
+/// destroyed) when sent to the tray, keeping exactly one renderer alive: a
+/// destroy/recreate cycle leaves the old WebKitWebProcess lingering in
+/// WebKit's process cache while the new window spawns a fresh one.
 fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("TungTung")
@@ -118,11 +121,13 @@ pub fn run() {
 
             let prefs = Arc::new(RuntimePrefs::load(&conn));
             let micro_break = Arc::new(MicroBreak::new());
+            let focus = Arc::new(focus::Focus::new());
             let scheduler = scheduler::spawn(
                 app.handle().clone(),
                 db_path.clone(),
                 prefs.clone(),
                 micro_break.clone(),
+                focus.clone(),
             );
 
             app.manage(AppState {
@@ -132,6 +137,7 @@ pub fn run() {
                 scheduler,
                 prefs: prefs.clone(),
                 micro_break,
+                focus,
             });
 
             build_tray(app.handle())?;
@@ -166,12 +172,17 @@ pub fn run() {
                         .close_to_tray;
                     if close_to_tray {
                         api.prevent_close();
-                        // Destroy rather than hide: this tears down the WebKit
-                        // renderer (the bulk of the app's memory) while the tray
-                        // icon and scheduler keep the process alive. The window
-                        // is rebuilt on demand by `show_main_window`.
-                        pending::set_ready(false);
-                        let _ = window.destroy();
+                        // Hide rather than destroy: destroying the window does
+                        // NOT reliably kill its WebKit renderer — WebKit keeps
+                        // the old WebKitWebProcess around in its process cache
+                        // while the recreated window spawns a fresh one, so
+                        // every close/reopen cycle stacked another ~250 MB
+                        // renderer (two live WebKitWebProcess children of one
+                        // main process observed). Hiding keeps exactly one
+                        // renderer for the app's lifetime: stable footprint,
+                        // no stacking, and the mounted UI keeps owning sound
+                        // playback (see `pending::is_ready`).
+                        let _ = window.hide();
                     }
                 }
                 WindowEvent::Destroyed => pending::set_ready(false),
@@ -192,8 +203,13 @@ pub fn run() {
             commands::update_habit,
             commands::archive_habit,
             commands::toggle_habit,
-            commands::start_focus_session,
-            commands::end_focus_session,
+            commands::focus_status,
+            commands::focus_start,
+            commands::focus_pause,
+            commands::focus_resume,
+            commands::focus_toggle,
+            commands::focus_skip,
+            commands::focus_reset,
             commands::list_focus_sessions,
             commands::micro_break_status,
             commands::micro_break_reset,
@@ -218,11 +234,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // With close-to-tray the main window is *destroyed* (not hidden) so
-            // the WebKit renderer is freed, which means destroying it trips the
-            // framework's last-window shutdown. Keep the tray + scheduler alive
-            // unless an explicit exit was requested (tray "Quit" calls
-            // `app.exit(0)`, which arrives here with `code = Some(..)`).
+            // With close-to-tray the main window is *hidden*, not closed, but
+            // Tauri may still treat the last hidden window as an exit trigger.
+            // Keep the tray + scheduler alive unless an explicit exit was
+            // requested (tray "Quit" calls `app.exit(0)`, which arrives here
+            // with `code = Some(..)`).
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if code.is_none() {
                     let close_to_tray = app
@@ -258,11 +274,31 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main_window(app),
             "new-reminder" => open_action(app, PendingAction::QuickAdd),
-            "start-focus" => open_action(app, PendingAction::FocusToggle { running: true }),
+            // The focus timer lives in Rust, so tray actions work with no
+            // window alive; the window still opens to show the state.
+            "start-focus" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    crate::focus::toggle(
+                        app,
+                        &state.conn(),
+                        &state.prefs,
+                        &state.focus,
+                        Some(true),
+                    );
+                    state.scheduler.wake();
+                }
+                show_main_window(app);
+            }
             "pause-focus" => {
-                // Pausing only makes sense while the UI is open; if it is not,
-                // there is no running session to pause.
-                let _ = tauri::Emitter::emit(app, "focus-toggle", false);
+                if let Some(state) = app.try_state::<AppState>() {
+                    crate::focus::toggle(
+                        app,
+                        &state.conn(),
+                        &state.prefs,
+                        &state.focus,
+                        Some(false),
+                    );
+                }
             }
             "settings" => open_action(
                 app,

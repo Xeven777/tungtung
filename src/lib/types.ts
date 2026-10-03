@@ -74,6 +74,21 @@ export interface FocusSession {
   completed: boolean;
 }
 
+export type FocusPhase = "idle" | "focus" | "short_break" | "long_break";
+
+/**
+ * Authoritative timer state owned by Rust (`src-tauri/src/focus.rs`). The UI
+ * only interpolates `remaining` for display and re-syncs on `focus-changed`.
+ */
+export interface FocusStatus {
+  phase: FocusPhase;
+  running: boolean;
+  remaining: number;
+  planned: number;
+  sessionId: string | null;
+  completedInCycle: number;
+}
+
 export interface Sound {
   id: string;
   name: string;
@@ -144,5 +159,4 @@ export interface SettingsDefaults {
 export type PendingAction =
   | { kind: "quickAdd" }
   | { kind: "navigate"; route: string }
-  | { kind: "focusToggle"; running: boolean }
   | { kind: "microBreakDue"; breakSeconds: number };

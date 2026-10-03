@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db;
 use crate::error::AppResult;
+use crate::focus::Focus;
 use crate::microbreak::MicroBreak;
 use crate::models::Reminder;
 use crate::notify::{self, Kind};
@@ -48,6 +49,7 @@ pub fn spawn(
     db_path: PathBuf,
     prefs: Arc<RuntimePrefs>,
     micro: Arc<MicroBreak>,
+    focus: Arc<Focus>,
 ) -> SchedulerHandle {
     let handle = SchedulerHandle {
         inner: Arc::new(Inner {
@@ -68,7 +70,7 @@ pub fn spawn(
                     return;
                 }
             };
-            run_loop(&app, &conn, &worker, &prefs, &micro);
+            run_loop(&app, &conn, &worker, &prefs, &micro, &focus);
         })
         .expect("failed to spawn scheduler thread");
 
@@ -81,6 +83,7 @@ fn run_loop(
     handle: &SchedulerHandle,
     prefs: &Arc<RuntimePrefs>,
     micro: &Arc<MicroBreak>,
+    focus: &Arc<Focus>,
 ) {
     loop {
         if handle.inner.stop.load(Ordering::SeqCst) {
@@ -96,8 +99,9 @@ fn run_loop(
             eprintln!("scheduler: processing habits failed: {err}");
         }
         process_micro_break(app, conn, micro, prefs, local_now);
+        process_focus(app, conn, prefs, focus);
 
-        let wait = next_wait(conn, now, micro.next_at());
+        let wait = next_wait(conn, now, micro.next_at(), focus.deadline());
         let guard = handle.inner.lock.lock().unwrap();
         let _ = handle.inner.cv.wait_timeout(guard, wait);
     }
@@ -300,8 +304,8 @@ fn process_micro_break(
 
     // A due break should surface: if a window can show the overlay, hand it
     // over immediately; otherwise rebuild the window around the overlay (the
-    // webview was destroyed when the app went to the tray). Purely minimized
-    // windows are restored, not hidden ones — there is nothing to cover there.
+    // app may have been started minimized, before any webview existed).
+    // Purely minimized windows are restored as normal.
     match app.get_webview_window("main") {
         Some(window) => {
             let _ = window.show();
@@ -339,10 +343,33 @@ fn process_micro_break(
 }
 
 // ---------------------------------------------------------------------------
+// Focus
+// ---------------------------------------------------------------------------
+
+/// Fire a due focus phase boundary. The focus timer lives in Rust (see
+/// `focus.rs`), so phase transitions happen here even with no webview alive.
+fn process_focus(
+    app: &AppHandle,
+    conn: &Connection,
+    prefs: &Arc<RuntimePrefs>,
+    focus: &Arc<Focus>,
+) {
+    if !focus.due(Utc::now()) {
+        return;
+    }
+    crate::focus::finish_phase(conn, prefs, app, focus, true);
+}
+
+// ---------------------------------------------------------------------------
 // Scheduling
 // ---------------------------------------------------------------------------
 
-fn next_wait(conn: &Connection, now: DateTime<Utc>, micro_at: Option<DateTime<Local>>) -> Duration {
+fn next_wait(
+    conn: &Connection,
+    now: DateTime<Utc>,
+    micro_at: Option<DateTime<Local>>,
+    focus_at: Option<DateTime<Utc>>,
+) -> Duration {
     let mut wait = MAX_SLEEP;
 
     match db::next_due_at(conn) {
@@ -359,6 +386,11 @@ fn next_wait(conn: &Connection, now: DateTime<Utc>, micro_at: Option<DateTime<Lo
 
     if let Some(at) = micro_at {
         let delta = at - Local::now();
+        wait = wait.min(Duration::from_millis(delta.num_milliseconds().max(0) as u64));
+    }
+
+    if let Some(at) = focus_at {
+        let delta = at - Utc::now();
         wait = wait.min(Duration::from_millis(delta.num_milliseconds().max(0) as u64));
     }
 

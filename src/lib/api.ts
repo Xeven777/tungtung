@@ -4,6 +4,7 @@ import type {
   Diagnostics,
   ExportBundle,
   FocusSession,
+  FocusStatus,
   Habit,
   HabitInput,
   HabitWithStats,
@@ -56,6 +57,21 @@ export const api = {
 
   endFocusSession: (id: string, actualSeconds: number, completed: boolean) =>
     invoke<FocusSession | null>("end_focus_session", { id, actualSeconds, completed }),
+
+  focusStatus: () => invoke<FocusStatus>("focus_status"),
+
+  focusStart: () => invoke<FocusStatus>("focus_start"),
+
+  focusPause: () => invoke<FocusStatus>("focus_pause"),
+
+  focusResume: () => invoke<FocusStatus>("focus_resume"),
+
+  focusToggle: (running?: boolean) =>
+    invoke<FocusStatus>("focus_toggle", { running: running ?? null }),
+
+  focusSkip: () => invoke<FocusStatus>("focus_skip"),
+
+  focusReset: () => invoke<FocusStatus>("focus_reset"),
 
   listFocusSessions: (limit = 50) =>
     invoke<FocusSession[]>("list_focus_sessions", { limit }),

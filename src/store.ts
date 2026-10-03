@@ -5,6 +5,8 @@ import { playSound } from "./lib/sounds";
 import type {
   AppSettings,
   Diagnostics,
+  FocusPhase,
+  FocusStatus,
   HabitWithStats,
   HistoryEntry,
   Reminder,
@@ -65,8 +67,6 @@ export interface MicroBreakState {
   planned: number;
 }
 
-export type FocusPhase = "idle" | "focus" | "short_break" | "long_break";
-
 interface FocusState {
   phase: FocusPhase;
   running: boolean;
@@ -120,14 +120,15 @@ interface Store {
   focusToggle: (force?: boolean) => void;
   focusSkip: () => Promise<void>;
   focusReset: () => Promise<void>;
-  stopFocusLoop: () => void;
+  applyFocusStatus: (status: FocusStatus) => void;
+  fetchFocus: () => Promise<void>;
 
   startMicroBreak: (seconds?: number) => void;
   dismissMicroBreak: () => void;
   snoozeMicroBreak: (waitMinutes?: number) => void;
 }
 
-let focusInterval: ReturnType<typeof setInterval> | null = null;
+let focusDisplay: ReturnType<typeof setInterval> | null = null;
 let microInterval: ReturnType<typeof setInterval> | null = null;
 
 // Guards `refreshAll` against overlapping passes.
@@ -247,6 +248,7 @@ export const useStore = create<Store>((set, get) => ({
           get().refreshReminders(),
           get().refreshHabits(),
           get().loadSounds(),
+          get().fetchFocus(),
         ]);
       } while (refreshQueued);
     } finally {
@@ -277,76 +279,59 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   focusStart: async () => {
-    const { settings, focus } = get();
-    const phase: FocusPhase = "focus";
-    const planned = minutes(settings.focusMinutes, 25) * 60;
-    const session = await api
-      .startFocusSession(planned, phase)
-      .catch(() => null);
-
-    set({
-      focus: {
-        phase,
-        running: true,
-        remaining: planned,
-        planned,
-        sessionId: session?.id ?? null,
-        completedInCycle: focus.completedInCycle,
-      },
-    });
-    startTicking(get, set);
+    const status = await api.focusStart().catch(() => null);
+    if (status) get().applyFocusStatus(status);
   },
 
   focusPause: () => {
-    stopTicking();
-    set({ focus: { ...get().focus, running: false } });
+    void api
+      .focusPause()
+      .then((status) => get().applyFocusStatus(status))
+      .catch(() => undefined);
   },
 
   focusResume: () => {
-    const focus = get().focus;
-    if (focus.phase === "idle") {
-      void get().focusStart();
-      return;
-    }
-    set({ focus: { ...focus, running: true } });
-    startTicking(get, set);
+    void api
+      .focusResume()
+      .then((status) => get().applyFocusStatus(status))
+      .catch(() => undefined);
   },
 
   focusToggle: (force) => {
-    const { focus } = get();
-    if (force === true && !focus.running) return get().focusResume();
-    if (force === false && focus.running) return get().focusPause();
-    if (focus.running) get().focusPause();
-    else get().focusResume();
+    void api
+      .focusToggle(force)
+      .then((status) => get().applyFocusStatus(status))
+      .catch(() => undefined);
   },
 
   focusSkip: async () => {
-    const focus = get().focus;
-    if (focus.phase === "idle") return;
-    await finishPhase(get, set, false);
+    const status = await api.focusSkip().catch(() => null);
+    if (status) get().applyFocusStatus(status);
   },
 
   focusReset: async () => {
-    stopTicking();
-    const focus = get().focus;
-    if (focus.sessionId) {
-      await api
-        .endFocusSession(focus.sessionId, focus.planned - focus.remaining, false)
-        .catch(() => undefined);
-    }
-    set({
-      focus: {
-        phase: "idle",
-        running: false,
-        remaining: 0,
-        planned: 0,
-        sessionId: null,
-        completedInCycle: 0,
-      },
-    });
+    const status = await api.focusReset().catch(() => null);
+    if (status) get().applyFocusStatus(status);
   },
 
-  stopFocusLoop: () => stopTicking(),
+  applyFocusStatus: (status) => {
+    set({
+      focus: {
+        phase: status.phase,
+        running: status.running,
+        remaining: status.remaining,
+        planned: status.planned,
+        sessionId: status.sessionId,
+        completedInCycle: status.completedInCycle,
+      },
+    });
+    ensureFocusTicker(get, set);
+  },
+
+  fetchFocus: async () => {
+    const status = await api.focusStatus().catch(() => null);
+    if (status) get().applyFocusStatus(status);
+  },
 
   // A micro break is just a countdown the UI owns; the scheduler decides when
   // it opens and restarts the work interval once it closes.
@@ -376,87 +361,42 @@ export const useStore = create<Store>((set, get) => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Focus loop
+// Focus display ticker
 // ---------------------------------------------------------------------------
 
-function stopTicking() {
-  if (focusInterval) {
-    clearInterval(focusInterval);
-    focusInterval = null;
-  }
-}
-
+// The timer itself lives in Rust; this only interpolates the countdown for
+// display while running. Every `focus-changed` event (and `fetchFocus`)
+// re-syncs to the authoritative deadline, so drift never accumulates. When
+// the countdown hits zero the backend has already advanced the phase (or is
+// about to) — refetch to reconcile rather than guessing the transition here.
 type Get = () => Store;
 type Set = (partial: Partial<Store>) => void;
 
-function startTicking(get: Get, set: Set) {
-  stopTicking();
-  focusInterval = setInterval(() => {
-    const focus = get().focus;
-    if (!focus.running) return;
-    const remaining = focus.remaining - 1;
-    if (remaining > 0) {
-      set({ focus: { ...focus, remaining } });
-      return;
-    }
-    void finishPhase(get, set, true);
-  }, 1000);
+function stopFocusDisplay() {
+  if (focusDisplay) {
+    clearInterval(focusDisplay);
+    focusDisplay = null;
+  }
 }
 
-async function finishPhase(get: Get, set: Set, natural: boolean) {
-  stopTicking();
-  const { focus, settings } = get();
-
-  if (focus.sessionId) {
-    await api
-      .endFocusSession(focus.sessionId, focus.planned - Math.max(0, focus.remaining), natural)
-      .catch(() => undefined);
+function ensureFocusTicker(get: Get, set: Set) {
+  if (!get().focus.running) {
+    stopFocusDisplay();
+    return;
   }
-
-  if (focus.phase === "focus" && natural && !inQuietHours(settings)) {
-    const sound = get().sounds.find((item) => item.id === settings.pomodoroSound);
-    playSound(settings.pomodoroSound, { volume: Number(settings.volume), filePath: sound?.filePath });
-  }
-
-  const completedInCycle =
-    focus.phase === "focus" ? focus.completedInCycle + 1 : focus.completedInCycle;
-
-  const nextPhase: FocusPhase =
-    focus.phase === "focus"
-      ? completedInCycle % minutes(settings.sessionsBeforeLongBreak, 4) === 0
-        ? "long_break"
-        : "short_break"
-      : "focus";
-
-  const durations: Record<FocusPhase, number> = {
-    idle: 0,
-    focus: minutes(settings.focusMinutes, 25) * 60,
-    short_break: minutes(settings.shortBreakMinutes, 5) * 60,
-    long_break: minutes(settings.longBreakMinutes, 15) * 60,
-  };
-  const planned = durations[nextPhase];
-
-  const autoStart =
-    nextPhase === "focus" ? settings.autoStartFocus === "true" : settings.autoStartBreaks === "true";
-
-  let sessionId: string | null = null;
-  if (autoStart) {
-    const session = await api.startFocusSession(planned, nextPhase).catch(() => null);
-    sessionId = session?.id ?? null;
-  }
-
-  set({
-    focus: {
-      phase: nextPhase,
-      running: autoStart,
-      remaining: planned,
-      planned,
-      sessionId,
-      completedInCycle: completedInCycle % minutes(settings.sessionsBeforeLongBreak, 4),
-    },
-  });
-
-  if (autoStart) startTicking(get, set);
+  if (focusDisplay) return;
+  focusDisplay = setInterval(() => {
+    const focus = get().focus;
+    if (!focus.running) {
+      stopFocusDisplay();
+      return;
+    }
+    if (focus.remaining > 0) {
+      set({ focus: { ...focus, remaining: focus.remaining - 1 } });
+      return;
+    }
+    void get().fetchFocus();
+  }, 1000);
 }
 
 // ---------------------------------------------------------------------------

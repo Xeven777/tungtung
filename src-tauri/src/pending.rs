@@ -1,10 +1,10 @@
 //! Deferred UI actions for the lazily-created main window.
 //!
-//! The main webview is created on demand and destroyed when the app is hidden
-//! to the tray, so a tray click or global shortcut may arrive while no webview
-//! (and therefore no React listener) exists yet. Instead of emitting into the
-//! void, actions are stashed here and drained by the frontend once it has
-//! registered its event listeners and calls the `ui_ready` command.
+//! The main webview is created on demand (lazy start) and hidden to the tray,
+//! so a tray click, global shortcut, or scheduled event may arrive while no
+//! webview — and therefore no React listener — exists yet. Instead of emitting
+//! into the void, actions are stashed here and drained by the frontend once it
+//! has registered its event listeners and calls the `ui_ready` command.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -20,8 +20,6 @@ pub enum PendingAction {
     QuickAdd,
     /// Navigate to a route (tray "Settings").
     Navigate { route: String },
-    /// Start/pause a focus session (tray "Start focus").
-    FocusToggle { running: bool },
     /// A micro break became due while the webview did not exist; carries the
     /// backend-computed break length so a recreated window can open the overlay
     /// itself on mount.
@@ -33,8 +31,8 @@ static PENDING: Mutex<Option<PendingAction>> = Mutex::new(None);
 /// Whether a webview currently exists whose React listeners are registered.
 static READY: AtomicBool = AtomicBool::new(false);
 
-/// Mark the UI ready after its listeners are registered (or `false` once the
-/// webview is destroyed).
+/// Mark the UI ready after its listeners are registered (or `false` when the
+/// window no longer has a mounted UI — e.g. it was destroyed).
 pub fn set_ready(ready: bool) {
     READY.store(ready, Ordering::SeqCst);
 }
@@ -69,9 +67,6 @@ fn emit(app: &AppHandle, action: &PendingAction) {
         }
         PendingAction::Navigate { route } => {
             let _ = app.emit("navigate", route.clone());
-        }
-        PendingAction::FocusToggle { running } => {
-            let _ = app.emit("focus-toggle", *running);
         }
         PendingAction::MicroBreakDue { break_seconds } => {
             let _ = app.emit(

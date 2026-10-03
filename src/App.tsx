@@ -10,7 +10,7 @@ import { TitleBar } from "@/components/TitleBar";
 import { Toaster } from "@/components/ui/sonner";
 import { api } from "@/lib/api";
 import { playSound } from "@/lib/sounds";
-import type { PendingAction, Reminder } from "@/lib/types";
+import type { FocusStatus, PendingAction, Reminder } from "@/lib/types";
 import { inQuietHours, useStore, watchSystemTheme, type Route } from "@/store";
 import { Today } from "@/views/Today";
 
@@ -94,8 +94,8 @@ function applyMicroBreakDue(breakSeconds?: number) {
 }
 
 /**
- * Apply an action the backend buffered while the webview did not exist (the
- * window is created lazily and destroyed when hidden to the tray). See
+ * Apply an action the backend buffered while no webview existed yet (the
+ * window is created lazily and hidden to the tray). See
  * `src-tauri/src/pending.rs`.
  */
 function applyPendingAction(action: PendingAction) {
@@ -106,9 +106,6 @@ function applyPendingAction(action: PendingAction) {
       break;
     case "navigate":
       state.setRoute(action.route as Route);
-      break;
-    case "focusToggle":
-      state.focusToggle(action.running);
       break;
     case "microBreakDue":
       applyMicroBreakDue(action.breakSeconds);
@@ -258,9 +255,27 @@ export default function App() {
       }),
     );
 
+    // Focus timer is owned by Rust: apply authoritative state and play the
+    // completion chime here (the backend plays it itself when no UI is ready).
     track(
-      listen<boolean>("focus-toggle", (event) => {
-        useStore.getState().focusToggle(event.payload);
+      listen<FocusStatus>("focus-changed", (event) => {
+        useStore.getState().applyFocusStatus(event.payload);
+      }),
+    );
+
+    track(
+      listen<string>("focus-chime", (event) => {
+        const state = useStore.getState();
+        const sound = state.sounds.find((item) => item.id === event.payload);
+        if (
+          state.settings.soundEnabled === "true" &&
+          !inQuietHours(state.settings)
+        ) {
+          playSound(event.payload, {
+            volume: Number(state.settings.volume),
+            filePath: sound?.filePath,
+          });
+        }
       }),
     );
 

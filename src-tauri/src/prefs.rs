@@ -33,6 +33,15 @@ pub struct Prefs {
     pub reminder_sound: String,
     pub habit_sound: String,
     pub micro_break_sound: String,
+    /// Focus timer durations and cycle behaviour (mirrors the old UI loop).
+    pub focus_minutes: u32,
+    pub short_break_minutes: u32,
+    pub long_break_minutes: u32,
+    pub sessions_before_long_break: u32,
+    pub auto_start_breaks: bool,
+    pub auto_start_focus: bool,
+    /// Chime played when a focus phase ends naturally.
+    pub pomodoro_sound: String,
 }
 
 impl Default for Prefs {
@@ -52,6 +61,13 @@ impl Default for Prefs {
             reminder_sound: "builtin-soft".into(),
             habit_sound: "none".into(),
             micro_break_sound: "builtin-minimal".into(),
+            focus_minutes: 25,
+            short_break_minutes: 5,
+            long_break_minutes: 15,
+            sessions_before_long_break: 4,
+            auto_start_breaks: true,
+            auto_start_focus: false,
+            pomodoro_sound: "builtin-bell".into(),
         }
     }
 }
@@ -159,6 +175,27 @@ impl RuntimePrefs {
             if let Some(value) = settings.get("microBreakSound") {
                 prefs.micro_break_sound = value.clone();
             }
+            prefs.focus_minutes = minutes(&settings, "focusMinutes", prefs.focus_minutes);
+            prefs.short_break_minutes =
+                minutes(&settings, "shortBreakMinutes", prefs.short_break_minutes);
+            prefs.long_break_minutes =
+                minutes(&settings, "longBreakMinutes", prefs.long_break_minutes);
+            prefs.sessions_before_long_break = minutes(
+                &settings,
+                "sessionsBeforeLongBreak",
+                prefs.sessions_before_long_break,
+            );
+            prefs.auto_start_breaks = settings
+                .get("autoStartBreaks")
+                .map(|v| truthy(v))
+                .unwrap_or(true);
+            prefs.auto_start_focus = settings
+                .get("autoStartFocus")
+                .map(|v| truthy(v))
+                .unwrap_or(false);
+            if let Some(value) = settings.get("pomodoroSound") {
+                prefs.pomodoro_sound = value.clone();
+            }
         }
         RuntimePrefs(Mutex::new(prefs))
     }
@@ -197,6 +234,29 @@ impl RuntimePrefs {
             "reminderSound" => prefs.reminder_sound = value.to_string(),
             "habitSound" => prefs.habit_sound = value.to_string(),
             "microBreakSound" => prefs.micro_break_sound = value.to_string(),
+            "focusMinutes" => {
+                if let Some(m) = parse_minutes(value) {
+                    prefs.focus_minutes = m;
+                }
+            }
+            "shortBreakMinutes" => {
+                if let Some(m) = parse_minutes(value) {
+                    prefs.short_break_minutes = m;
+                }
+            }
+            "longBreakMinutes" => {
+                if let Some(m) = parse_minutes(value) {
+                    prefs.long_break_minutes = m;
+                }
+            }
+            "sessionsBeforeLongBreak" => {
+                if let Some(m) = parse_minutes(value) {
+                    prefs.sessions_before_long_break = m;
+                }
+            }
+            "autoStartBreaks" => prefs.auto_start_breaks = truthy(value),
+            "autoStartFocus" => prefs.auto_start_focus = truthy(value),
+            "pomodoroSound" => prefs.pomodoro_sound = value.to_string(),
             _ => {}
         }
     }
